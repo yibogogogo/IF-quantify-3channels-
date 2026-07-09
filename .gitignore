@@ -1,0 +1,7 @@
+_analysis_results/
+*.pyc
+__pycache__/
+.DS_Store
+*.tif
+*.jpg
+*.png
