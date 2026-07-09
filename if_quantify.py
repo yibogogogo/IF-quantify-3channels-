@@ -2,7 +2,7 @@
 """
 免疫荧光定量分析工具
 ====================
-CD138 分选阳性细胞的 TTLL12 表达定量（全场比值法）
+CD138 分选阳性细胞的目的基因表达定量（全场比值法）
 
 使用方法：
   1. 将此脚本放在与数据文件夹同级的目录中
@@ -19,7 +19,7 @@ CD138 分选阳性细胞的 TTLL12 表达定量（全场比值法）
 
 实验背景：
   所有细胞为 CD138 分选阳性后甩片制片。
-  定量公式: TTLL12 平均表达 = 全场 488 总荧光 / DAPI 总核数
+  定量公式: 目的基因平均表达 = 全场 488 总荧光 / DAPI 总核数
 
 安全约束：只读取文件，绝不修改或删除任何文件。
 """
@@ -46,7 +46,7 @@ OUTPUT_SUBDIR = "_analysis_results"
 # 格式: {"Zen通道号": ("标签", "RGB通道提取")}
 CHANNEL_MAP = {
     "c0": ("CD138",  "R"),   # 通道0: 594nm, CD138,  从RGB的R通道提取
-    "c1": ("TTLL12", "G"),   # 通道1: 488nm, TTLL12, 从RGB的G通道提取
+    "c1": ("目的基因", "G"),   # 通道1: 488nm, 目的基因, 从RGB的G通道提取
     "c2": ("DAPI",   "B"),   # 通道2: DAPI,  细胞核, 从RGB的B通道提取
 }
 # 以后换染料/通道顺序，只需改上面这三行！
@@ -91,7 +91,7 @@ def scan_samples(work_dir: str) -> list:
 def scan_fields(sample_dir: str) -> list:
     """扫描样本内所有视野，返回 [(视野号, dapi路径, ttll12路径, cd138路径)]"""
     dapi_key,   dapi_ch   = CH_BY_NAME["DAPI"]
-    ttll12_key, ttll12_ch = CH_BY_NAME["TTLL12"]
+    ttll12_key, ttll12_ch = CH_BY_NAME["目的基因"]
     cd138_key,  cd138_ch  = CH_BY_NAME["CD138"]
     ch_keys = {dapi_key: None, ttll12_key: None, cd138_key: None}
 
@@ -173,7 +173,7 @@ def measure_background(img: np.ndarray, nuclei_mask: np.ndarray) -> float:
 def process_field(dapi_path: str, ttll12_path: str, cd138_path: str) -> dict:
     """处理单个视野"""
     dapi   = extract_channel(dapi_path,   CH_BY_NAME["DAPI"][1])
-    ttll12 = extract_channel(ttll12_path, CH_BY_NAME["TTLL12"][1])
+    ttll12 = extract_channel(ttll12_path, CH_BY_NAME["目的基因"][1])
     cd138  = extract_channel(cd138_path,  CH_BY_NAME["CD138"][1])
     if any(x is None for x in [dapi, ttll12, cd138]):
         return None
@@ -212,7 +212,7 @@ def process_field(dapi_path: str, ttll12_path: str, cd138_path: str) -> dict:
         n_in_cd138 = in_cd138
 
     logger.info(
-        f"    核={n_nuc}, TTLL12/核={mean_all:.0f}, "
+        f"    核={n_nuc}, 目的基因/核={mean_all:.0f}, "
         f"背景={bg_mean:.1f}, CD138质控={cd138_pct}%")
 
     return {
@@ -315,7 +315,7 @@ def main():
         summary.append({
             "Sample": sn, "N_Fields": nf,
             "Total_Cells": total_cells,
-            "TTLL12_Mean": round(wt, 2),
+            "Gene_Mean": round(wt, 2),
             "SD": round(sd, 2),
             "SEM": round(sd / np.sqrt(nf), 2) if nf > 1 else 0,
             "CD138_QC_pct": round(np.mean(qc_vals), 1),
@@ -331,11 +331,11 @@ def main():
     logger.info(f"分析完成 — {os.path.basename(work_dir)}")
     logger.info(f"{'='*68}")
     logger.info(f"{'样本':<12} {'视野':>4} {'总细胞':>8} "
-                f"{'TTLL12均值':>14} {'SD':>10} {'SEM':>10} {'CD138质控':>9}")
+                f"{'目的基因均值':>14} {'SD':>10} {'SEM':>10} {'CD138质控':>9}")
     logger.info("-"*68)
     for r in summary:
         logger.info(f"{r['Sample']:<12} {r['N_Fields']:>4} {r['Total_Cells']:>8} "
-                   f"{r['TTLL12_Mean']:>14.1f} {r['SD']:>10.1f} {r['SEM']:>10.1f} "
+                   f"{r['Gene_Mean']:>14.1f} {r['SD']:>10.1f} {r['SEM']:>10.1f} "
                    f"{r['CD138_QC_pct']:>8.1f}%")
     logger.info(f"\n详细: {detail_csv}")
     logger.info(f"汇总: {sum_csv}")
