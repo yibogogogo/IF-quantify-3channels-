@@ -31,6 +31,138 @@ from scipy import ndimage as scipy_ndimage
 from skimage import filters, morphology, measure, segmentation, feature
 
 # ============================================================================
+#  GPU 自动检测
+# ============================================================================
+
+def _detect_gpu():
+    """检测各框架 GPU 可用性，返回状态摘要
+
+    支持 NVIDIA CUDA / AMD DirectML / Apple MPS。
+    """
+    result = {"pytorch": False, "tensorflow": False,
+              "directml": False, "mps": False, "summary": "CPU"}
+
+    # PyTorch CUDA (NVIDIA)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            result["pytorch"] = True
+            result["summary"] = f"GPU (NVIDIA): {torch.cuda.get_device_name(0)}"
+    except ImportError:
+        pass
+
+    # DirectML (AMD / Intel GPU via torch-directml)
+    if not result["pytorch"]:
+        try:
+            import torch_directml
+            torch_directml.device()
+            result["directml"] = True
+            result["summary"] = "GPU (AMD/Intel): DirectML"
+        except ImportError:
+            pass
+
+    # Apple MPS
+    if not result["pytorch"] and not result["directml"]:
+        try:
+            import torch
+            if (hasattr(torch.backends, 'mps') and
+                    torch.backends.mps.is_available()):
+                result["mps"] = True
+                result["summary"] = "GPU (Apple): MPS"
+        except ImportError:
+            pass
+
+    # TensorFlow (StarDist)
+    try:
+        import tensorflow as tf
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            result["tensorflow"] = True
+    except ImportError:
+        pass
+
+    return result
+
+
+# GPU 检测缓存（避免重复检测）
+_gpu_info = None
+
+
+def _gpu_cached():
+    """GPU 检测（带缓存）"""
+    global _gpu_info
+    if _gpu_info is None:
+        _gpu_info = _detect_gpu()
+    return _gpu_info
+
+
+# StarDist 延迟加载（仅 --stardist 时导入）
+_stardist_model = None
+
+def _get_stardist():
+    """延迟加载 StarDist 预训练模型（2D_versatile_fluo，适用 DAPI 核）
+
+    自动处理 Windows 符号链接权限问题。
+    """
+    global _stardist_model
+    if _stardist_model is None:
+        try:
+            from stardist.models import StarDist2D
+            try:
+                _stardist_model = StarDist2D.from_pretrained('2D_versatile_fluo')
+            except OSError as e:
+                # Windows 上创建符号链接需要管理员权限
+                # Fallback: 手动复制解压后的模型文件夹
+                if hasattr(e, 'winerror') and e.winerror == 1314:
+                    _fix_stardist_symlink()
+                    _stardist_model = StarDist2D.from_pretrained('2D_versatile_fluo')
+                else:
+                    raise
+            logging.getLogger("IF_Quant").info(
+                "StarDist 预训练模型加载完成 (2D_versatile_fluo)")
+        except ImportError:
+            logging.getLogger("IF_Quant").error(
+                "StarDist 未安装。请运行: pip install stardist tensorflow")
+            sys.exit(1)
+        except Exception as e:
+            logging.getLogger("IF_Quant").error(f"StarDist 模型加载失败: {e}")
+            sys.exit(1)
+    return _stardist_model
+
+
+def _fix_stardist_symlink():
+    """修复 Windows 上 StarDist 模型符号链接权限问题"""
+    import shutil
+    from pathlib import Path
+    keras_home = os.environ.get('KERAS_HOME',
+                                os.path.join(os.path.expanduser('~'), '.keras'))
+    model_dir = Path(keras_home) / 'models' / 'StarDist2D' / '2D_versatile_fluo'
+    extracted = model_dir / '2D_versatile_fluo_extracted'
+    target = model_dir / '2D_versatile_fluo'
+    if extracted.is_dir() and not target.exists():
+        shutil.copytree(str(extracted), str(target))
+        logging.getLogger("IF_Quant").info("StarDist 模型目录已手动复制（绕过 symlink）")
+
+# Cellpose 延迟加载（仅 --cellpose 时导入）
+_cellpose_model = None
+
+def _get_cellpose():
+    global _cellpose_model
+    if _cellpose_model is None:
+        try:
+            from cellpose import models as cp_models
+            gpu_info = _gpu_cached()
+            _cellpose_model = cp_models.CellposeModel(
+                gpu=gpu_info["pytorch"])
+            logging.getLogger("IF_Quant").info(
+                f"Cellpose 预训练模型加载完成 (cpsam_v2, {gpu_info['summary']})")
+        except ImportError:
+            logging.getLogger("IF_Quant").error(
+                "Cellpose 未安装。请运行: pip install cellpose")
+            sys.exit(1)
+    return _cellpose_model
+
+# ============================================================================
 #  ▸▸▸ 配置区 ◂◂◂  按需修改以下参数
 # ============================================================================
 
@@ -131,16 +263,19 @@ def extract_channel(jpg_path: str, rgb_ch: str = "B") -> np.ndarray:
 
 
 def segment_nuclei(dapi_img: np.ndarray) -> np.ndarray:
-    """DAPI 核分割 -> 返回 label_mask"""
-    blr = filters.gaussian(dapi_img, sigma=2.0)
-    otsu = filters.threshold_otsu(blr)
-    bin_ = blr > otsu
+    """DAPI 核分割 -> 返回 label_mask（v2: multi-Otsu 3类 + 弱 closing）"""
+    blr = filters.gaussian(dapi_img, sigma=1.5)
+    # multi-Otsu 3类：暗背景 / 弱信号 / 亮核
+    # 取最亮类（>第2个阈值）作为核候选，大幅减少背景误检
+    thresholds = filters.threshold_multiotsu(blr, classes=3)
+    bin_ = blr > thresholds[1]
     op = morphology.opening(bin_, morphology.disk(2))
-    cl = morphology.remove_small_objects(op, max_size=50)
-    cl = morphology.closing(cl, morphology.disk(3))
+    cl = morphology.remove_small_objects(op, max_size=30)
+    # 只做 disk(1) closing，避免把相邻核粘连成大片
+    cl = morphology.closing(cl, morphology.disk(1))
 
     dist = scipy_ndimage.distance_transform_edt(cl)
-    peaks = feature.peak_local_max(dist, min_distance=10,
+    peaks = feature.peak_local_max(dist, min_distance=8,
                                     exclude_border=3, labels=cl)
     if len(peaks) == 0:
         return np.zeros(dapi_img.shape, dtype=np.int32)
@@ -160,26 +295,129 @@ def segment_nuclei(dapi_img: np.ndarray) -> np.ndarray:
     return out
 
 
+def segment_nuclei_stardist(dapi_img: np.ndarray,
+                            prob_thresh: float = 0.6,
+                            dapi_min_intensity: float = None) -> np.ndarray:
+    """StarDist 预训练模型 DAPI 核分割 -> 返回 label_mask
+
+    使用 2D_versatile_fluo 模型（在多种荧光核图像上训练）。
+    两层过滤：
+      1. prob_thresh — 模型对该像素属于核的置信度下限（推荐 0.5~0.7）
+      2. dapi_min_intensity — DAPI 通道均值下限，剔除弱信号假阳性
+
+    大图自动分块处理避免内存溢出。
+    """
+    model = _get_stardist()
+    labels, _ = model.predict_instances(
+        dapi_img,
+        n_tiles=(2, 2) if max(dapi_img.shape) > 2048 else None,
+        prob_thresh=prob_thresh,
+        nms_thresh=0.3,
+    )
+    # 获取 DAPI 背景均值用于自动阈值
+    if dapi_min_intensity is None:
+        dapi_min_intensity = np.percentile(dapi_img, 20) * 1.5
+
+    out = np.zeros_like(labels)
+    for p in measure.regionprops(labels, intensity_image=dapi_img):
+        if p.area < NUCLEUS_SIZE_MIN or p.area > NUCLEUS_SIZE_MAX:
+            continue
+        circ = (4 * np.pi * p.area) / (p.perimeter**2) if p.perimeter > 0 else 0
+        if circ < CIRCULARITY_MIN:
+            continue
+        # DAPI 信号强度后验过滤：真核的 DAPI 信号应显著高于背景
+        if p.intensity_mean < dapi_min_intensity:
+            continue
+        out[labels == p.label] = p.label
+    return out
+
+
+def segment_nuclei_cellpose(dapi_img: np.ndarray,
+                            flow_threshold: float = 0.4,
+                            cellprob_threshold: float = 0.0) -> np.ndarray:
+    """Cellpose 预训练模型 DAPI 核分割 -> 返回 label_mask
+
+    uses cpsam_v2 (SAM-based) model.
+    """
+    model = _get_cellpose()
+    # Cellpose 灰度图用 channels=[0,0]
+    masks, _, _, _ = model.eval(
+        dapi_img,
+        channels=[0, 0],
+        diameter=None,
+        flow_threshold=flow_threshold,
+        cellprob_threshold=cellprob_threshold,
+    )
+    out = np.zeros_like(masks)
+    for p in measure.regionprops(masks, intensity_image=dapi_img):
+        if p.area < NUCLEUS_SIZE_MIN or p.area > NUCLEUS_SIZE_MAX:
+            continue
+        circ = (4 * np.pi * p.area) / (p.perimeter**2) if p.perimeter > 0 else 0
+        if circ < CIRCULARITY_MIN:
+            continue
+        out[masks == p.label] = p.label
+    return out
+
+
 def measure_background(img: np.ndarray, nuclei_mask: np.ndarray) -> float:
-    """从图像四边采样背景"""
+    """从图像四边采样背景（中位数，排除核区域）
+
+    优先中位数（正态性假设下均值≈中位数；有荧光碎屑时中位数更稳健）。
+    """
     h, w = img.shape
     b = BACKGROUND_BORDER
     border = np.zeros((h, w), dtype=bool)
     border[:b, :] = border[-b:, :] = border[:, :b] = border[:, -b:] = True
     bg = border & (nuclei_mask == 0)
-    return img[bg].mean() if bg.sum() > 100 else img[border].mean()
+    pixels = img[bg]
+    if pixels.size < 100:
+        pixels = img[border]
+    return float(np.median(pixels))
 
 
-def process_field(dapi_path: str, ttll12_path: str, cd138_path: str) -> dict:
-    """处理单个视野"""
+def process_field(dapi_path: str, ttll12_path: str, cd138_path: str,
+                  use_stardist: bool = False,
+                  use_cellpose: bool = False,
+                  use_ensemble: bool = False,
+                  prob_thresh: float = 0.6) -> dict:
+    """处理单个视野
+
+    use_ensemble=True 时：同时跑 StarDist + Cellpose，核数取两者平均。
+    """
     dapi   = extract_channel(dapi_path,   CH_BY_NAME["DAPI"][1])
     ttll12 = extract_channel(ttll12_path, CH_BY_NAME["目的基因"][1])
     cd138  = extract_channel(cd138_path,  CH_BY_NAME["CD138"][1])
     if any(x is None for x in [dapi, ttll12, cd138]):
         return None
 
-    nuclei_mask = segment_nuclei(dapi)
-    n_nuc = len(np.unique(nuclei_mask)) - 1
+    if use_ensemble:
+        # 并行推理 StarDist + Cellpose
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_sd = pool.submit(segment_nuclei_stardist, dapi, prob_thresh=prob_thresh)
+            fut_cp = pool.submit(segment_nuclei_cellpose, dapi)
+            # StarDist ~30s CPU, Cellpose 无超时（CPU 上可能很久）
+            mask_sd = fut_sd.result(timeout=120)
+            mask_cp = fut_cp.result(timeout=600)  # Cellpose SAM 模型 CPU 慢
+        n_sd = len(np.unique(mask_sd)) - 1
+        n_cp = len(np.unique(mask_cp)) - 1
+        if n_sd == 0 or n_cp == 0:
+            return None
+        n_nuc = round((n_sd + n_cp) / 2)
+        logger.info(f"    [Ensemble] StarDist={n_sd}, Cellpose={n_cp} → 平均={n_nuc}")
+    elif use_cellpose:
+        nuclei_mask = segment_nuclei_cellpose(dapi)
+        n_nuc = len(np.unique(nuclei_mask)) - 1
+    elif use_stardist:
+        nuclei_mask = segment_nuclei_stardist(dapi, prob_thresh=prob_thresh)
+        n_nuc = len(np.unique(nuclei_mask)) - 1
+    else:
+        nuclei_mask = segment_nuclei(dapi)
+        n_nuc = len(np.unique(nuclei_mask)) - 1
+
+    if use_ensemble:
+        # ensemble 背景测量用并集 mask，更全面排除核区域
+        nuclei_mask = np.where((mask_sd > 0) | (mask_cp > 0), mask_sd, 0).astype(np.int32)
     if n_nuc == 0:
         return None
 
@@ -215,7 +453,7 @@ def process_field(dapi_path: str, ttll12_path: str, cd138_path: str) -> dict:
         f"    核={n_nuc}, 目的基因/核={mean_all:.0f}, "
         f"背景={bg_mean:.1f}, CD138质控={cd138_pct}%")
 
-    return {
+    result = {
         "n_nuclei": n_nuc,
         "mean_per_cell": round(mean_all, 2),
         "bg_mean": round(bg_mean, 2),
@@ -225,6 +463,28 @@ def process_field(dapi_path: str, ttll12_path: str, cd138_path: str) -> dict:
         "cd138_nuclei": n_in_cd138,
         "cd138_mean": mean_cd138,
     }
+    if use_ensemble:
+        result["n_sd"] = n_sd
+        result["n_cp"] = n_cp
+    return result
+
+
+def _safe_write_csv(path, rows, fieldnames):
+    """安全写入 CSV，自动重试处理文件锁"""
+    import time
+    for attempt in range(5):
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.DictWriter(f, fieldnames=fieldnames,
+                                   extrasaction="ignore")
+                w.writeheader()
+                w.writerows(rows)
+            return
+        except PermissionError:
+            if attempt < 4:
+                time.sleep(0.5)
+            else:
+                raise
 
 
 def main():
@@ -236,6 +496,14 @@ def main():
     ap.add_argument("--test", action="store_true",
                     help=f"测试模式：每样本只处理前{TEST_FIELDS}个视野")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--stardist", action="store_true",
+                    help="使用 StarDist 预训练 DL 模型进行 DAPI 核分割（需先 pip install stardist tensorflow）")
+    ap.add_argument("--cellpose", action="store_true",
+                    help="使用 Cellpose 预训练模型进行 DAPI 核分割（需先 pip install cellpose）")
+    ap.add_argument("--ensemble", action="store_true",
+                    help="双模型集成：同时使用 StarDist + Cellpose，核数取平均提高准确率")
+    ap.add_argument("--prob-thresh", type=float, default=0.6,
+                    help="StarDist 概率阈值 (0~1)，越高越严格，默认 0.6")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -273,7 +541,15 @@ def main():
         sys.exit(0)
 
     os.makedirs(out_dir, exist_ok=True)
-    logger.info(f"\n开始分析...")
+    if args.ensemble:
+        seg_method = f"Ensemble SD+CP (prob={args.prob_thresh})"
+    elif args.cellpose:
+        seg_method = "Cellpose (cpsam_v2)"
+    elif args.stardist:
+        seg_method = f"StarDist (prob={args.prob_thresh})"
+    else:
+        seg_method = "multi-Otsu"
+    logger.info(f"\n开始分析... (核分割: {seg_method})")
 
     all_rows = []
     for sd in samples:
@@ -283,7 +559,11 @@ def main():
             fields = fields[:TEST_FIELDS]
         for fid, dap, t12, cd in fields:
             try:
-                r = process_field(dap, t12, cd)
+                r = process_field(dap, t12, cd,
+                                  use_stardist=args.stardist or args.ensemble,
+                                  use_cellpose=args.cellpose or args.ensemble,
+                                  use_ensemble=args.ensemble,
+                                  prob_thresh=args.prob_thresh)
                 if r:
                     all_rows.append({"Sample": sn, "Field": f"New-{fid}", **r})
             except Exception as e:
@@ -295,11 +575,10 @@ def main():
     # CSV: 每个视野详情
     detail_csv = os.path.join(out_dir, "if_quant_detail.csv")
     fn = ["Sample","Field",
-          "n_nuclei","mean_per_cell","bg_mean","total_raw","total_corrected",
+          "n_nuclei","n_sd","n_cp",
+          "mean_per_cell","bg_mean","total_raw","total_corrected",
           "cd138_qc_pct","cd138_nuclei","cd138_mean"]
-    with open(detail_csv, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=fn, extrasaction="ignore")
-        w.writeheader(); w.writerows(all_rows)
+    _safe_write_csv(detail_csv, all_rows, fn)
 
     # CSV: 样本汇总
     summary = []
@@ -322,9 +601,7 @@ def main():
         })
 
     sum_csv = os.path.join(out_dir, "if_quant_summary.csv")
-    with open(sum_csv, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=list(summary[0].keys()))
-        w.writeheader(); w.writerows(summary)
+    _safe_write_csv(sum_csv, summary, list(summary[0].keys()))
 
     # 终端表格
     logger.info(f"\n{'='*68}")
