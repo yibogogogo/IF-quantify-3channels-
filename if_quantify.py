@@ -187,7 +187,7 @@ CHANNEL_MAP = {
 NUCLEUS_SIZE_MIN   = 200     # 最小核面积（像素^2），小淋巴细胞核约200-500
 NUCLEUS_SIZE_MAX   = 80000   # 最大核面积，大浆细胞核可达数万
 CIRCULARITY_MIN    = 0.1     # 最低圆形度 (0~1)，越低越允许不规则核
-PROB_THRESH        = 0.75    # StarDist 概率阈值（人工计数验证：HD-LM GT=158→检出=162）
+PROB_THRESH        = 0.78    # StarDist 概率阈值（5样本交叉验证，平均误差~21%）
 
 # ---- 背景采样 ----
 BACKGROUND_BORDER  = 30      # 从图像四边取 N 像素宽的边框作为背景
@@ -297,7 +297,7 @@ def segment_nuclei(dapi_img: np.ndarray) -> np.ndarray:
 
 
 def segment_nuclei_stardist(dapi_img: np.ndarray,
-                            prob_thresh: float = 0.75) -> np.ndarray:
+                            prob_thresh: float = 0.78) -> np.ndarray:
     """StarDist 预训练模型 DAPI 核分割 -> 返回 label_mask
 
     CNN 内部已完成去噪/阈值/分割/形状识别。
@@ -361,7 +361,7 @@ def process_field(dapi_path: str, ttll12_path: str, cd138_path: str,
                   use_stardist: bool = False,
                   use_cellpose: bool = False,
                   use_ensemble: bool = False,
-                  prob_thresh: float = 0.75) -> dict:
+                  prob_thresh: float = 0.78) -> dict:
     """处理单个视野
 
     use_ensemble=True 时：同时跑 StarDist + Cellpose，核数取两者平均。
@@ -484,8 +484,8 @@ def main():
                     help="使用 Cellpose 预训练模型进行 DAPI 核分割（需先 pip install cellpose）")
     ap.add_argument("--ensemble", action="store_true",
                     help="双模型集成：同时使用 StarDist + Cellpose，核数取平均提高准确率")
-    ap.add_argument("--prob-thresh", type=float, default=0.75,
-                    help="StarDist 概率阈值 (0~1)，越高越严格，默认 0.75 (人工计数验证)")
+    ap.add_argument("--prob-thresh", type=float, default=0.78,
+                    help="StarDist 概率阈值 (0~1)，越高越严格，默认 0.78 (5样本交叉验证)")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
