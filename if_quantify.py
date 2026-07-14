@@ -491,6 +491,8 @@ def main():
                     help="StarDist 概率阈值 (0~1)，越高越严格，默认 0.78 (5样本交叉验证)")
     ap.add_argument("--parallel", type=int, default=1, metavar="N",
                     help="并行处理 N 个视野（默认 1=串行，建议 3-5）")
+    ap.add_argument("--calibrate", type=str, default=None, metavar="FILE_OR_S1=GT1",
+                    help="样本校准：校准文件路径 或 'S1=N1,S2=N2' 格式（每样本一个GT，自动二分搜索）")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -527,13 +529,62 @@ def main():
     if args.dry_run:
         sys.exit(0)
 
+    # 样本校准：每样本二分搜索最优 prob_thresh
+    sample_prob_thresh = {}
+    if args.calibrate:
+        cals = {}
+        cal_src = args.calibrate
+        # 支持文件路径或内联格式
+        if os.path.isfile(cal_src):
+            with open(cal_src, encoding="utf-8") as f:
+                cal_src = f.read()
+        for item in cal_src.replace("\n", ",").split(","):
+            item = item.strip()
+            if not item or "=" not in item:
+                continue
+            k, v = item.split("=", 1)
+            cals[k.strip()] = int(v.strip())
+        logger.info("\n样本校准中（二分搜索 prob_thresh）...")
+        for sample_name, gt_count in cals.items():
+            sd = next((s for s in samples if os.path.basename(s) == sample_name), None)
+            if sd is None:
+                logger.warning(f"  样本 '{sample_name}' 未找到，跳过")
+                continue
+            fields = scan_fields(sd)
+            if not fields:
+                logger.warning(f"  样本 '{sample_name}' 无视野，跳过")
+                continue
+            # 用第一个视野校准
+            _, dap_path, _, _ = fields[0]
+            dapi = extract_channel(dap_path, CH_BY_NAME["DAPI"][1])
+            lo, hi = 0.35, 0.92
+            best_pt, best_diff = None, float("inf")
+            for _ in range(12):  # 二分
+                mid = (lo + hi) / 2
+                mask = segment_nuclei_stardist(dapi, prob_thresh=mid)
+                n = len(np.unique(mask)) - 1
+                diff = abs(n - gt_count)
+                if diff < best_diff:
+                    best_diff, best_pt = diff, mid
+                if n > gt_count:
+                    lo = mid  # 太多了，提高阈值
+                else:
+                    hi = mid  # 太少了，降低阈值
+            sample_prob_thresh[os.path.basename(sd)] = round(best_pt, 3)
+            logger.info(f"  {os.path.basename(sd)}: GT={gt_count} → prob={round(best_pt,3)} (最佳diff={best_diff})")
+        logger.info("")
+
     os.makedirs(out_dir, exist_ok=True)
     if args.ensemble:
         seg_method = f"Ensemble SD+CP (prob={args.prob_thresh})"
     elif args.cellpose:
         seg_method = "Cellpose (cpsam_v2)"
     elif args.stardist:
-        seg_method = f"StarDist (prob={args.prob_thresh})"
+        if sample_prob_thresh:
+            pts = [f"{s}={v}" for s,v in sorted(sample_prob_thresh.items())]
+            seg_method = f"StarDist (校准: {', '.join(pts)})"
+        else:
+            seg_method = f"StarDist (prob={args.prob_thresh})"
     else:
         seg_method = "multi-Otsu"
     logger.info(f"\n开始分析... (核分割: {seg_method})"
@@ -552,11 +603,12 @@ def main():
     def _process_one(task):
         sn, fid, dap, t12, cd = task
         try:
+            pt = sample_prob_thresh.get(sn, args.prob_thresh)
             r = process_field(dap, t12, cd,
                               use_stardist=args.stardist or args.ensemble,
                               use_cellpose=args.cellpose or args.ensemble,
                               use_ensemble=args.ensemble,
-                              prob_thresh=args.prob_thresh)
+                              prob_thresh=pt)
             if r:
                 return {"Sample": sn, "Field": f"New-{fid}", **r}
         except Exception as e:

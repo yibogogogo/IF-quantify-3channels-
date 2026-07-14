@@ -1,0 +1,11 @@
+# 样本校准文件 — 每样本一个人工计数值
+# 格式: 样本名 = 细胞核数
+# 运行: python if_quantify.py --stardist --calibrate calibrations.txt
+# 会自动用第一个视野二分搜索最优 prob_thresh
+
+HD-HCZ=745
+HD-LM=249
+HD-ZZY=164
+MM-LYM=147
+NDMM-HYL=31
+NDMM-PGX=57

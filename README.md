@@ -98,6 +98,9 @@ python if_quantify.py --stardist --prob-thresh 0.70   # 更宽松
 # 双模型集成（最准）
 python if_quantify.py --ensemble
 
+# 样本校准（每样本一个GT，自动二分搜索最优阈值）
+python if_quantify.py --stardist --calibrate calibrations.txt
+
 # 并行加速（3视野并行）
 python if_quantify.py --stardist --parallel 3
 
