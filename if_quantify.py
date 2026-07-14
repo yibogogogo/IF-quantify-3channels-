@@ -297,15 +297,11 @@ def segment_nuclei(dapi_img: np.ndarray) -> np.ndarray:
 
 
 def segment_nuclei_stardist(dapi_img: np.ndarray,
-                            prob_thresh: float = 0.75,
-                            dapi_min_intensity: float = None) -> np.ndarray:
+                            prob_thresh: float = 0.75) -> np.ndarray:
     """StarDist 预训练模型 DAPI 核分割 -> 返回 label_mask
 
-    使用 2D_versatile_fluo 模型（在多种荧光核图像上训练）。
-    整图推理（不分割），避免边界拼接伪影。
-    两层过滤：
-      1. prob_thresh — 模型置信度下限（推荐 0.70~0.80，已人工验证 0.75）
-      2. dapi_min_intensity — DAPI 通道均值下限，剔除弱信号假阳性
+    CNN 内部已完成去噪/阈值/分割/形状识别。
+    仅后置面积过滤去除碎片。
     """
     model = _get_stardist()
     labels, _ = model.predict_instances(
@@ -313,19 +309,9 @@ def segment_nuclei_stardist(dapi_img: np.ndarray,
         prob_thresh=prob_thresh,
         nms_thresh=0.3,
     )
-    # 获取 DAPI 背景均值用于自动阈值
-    if dapi_min_intensity is None:
-        dapi_min_intensity = np.percentile(dapi_img, 20) * 1.5
-
     out = np.zeros_like(labels)
-    for p in measure.regionprops(labels, intensity_image=dapi_img):
+    for p in measure.regionprops(labels):
         if p.area < NUCLEUS_SIZE_MIN or p.area > NUCLEUS_SIZE_MAX:
-            continue
-        circ = (4 * np.pi * p.area) / (p.perimeter**2) if p.perimeter > 0 else 0
-        if circ < CIRCULARITY_MIN:
-            continue
-        # DAPI 信号强度后验过滤：真核的 DAPI 信号应显著高于背景
-        if p.intensity_mean < dapi_min_intensity:
             continue
         out[labels == p.label] = p.label
     return out
@@ -336,10 +322,10 @@ def segment_nuclei_cellpose(dapi_img: np.ndarray,
                             cellprob_threshold: float = 0.0) -> np.ndarray:
     """Cellpose 预训练模型 DAPI 核分割 -> 返回 label_mask
 
-    uses cpsam_v2 (SAM-based) model.
+    SAM-based 模型内部已完成分割/形状识别。
+    仅后置面积过滤去除碎片。
     """
     model = _get_cellpose()
-    # Cellpose 灰度图用 channels=[0,0]
     masks, _, _, _ = model.eval(
         dapi_img,
         channels=[0, 0],
@@ -348,11 +334,8 @@ def segment_nuclei_cellpose(dapi_img: np.ndarray,
         cellprob_threshold=cellprob_threshold,
     )
     out = np.zeros_like(masks)
-    for p in measure.regionprops(masks, intensity_image=dapi_img):
+    for p in measure.regionprops(masks):
         if p.area < NUCLEUS_SIZE_MIN or p.area > NUCLEUS_SIZE_MAX:
-            continue
-        circ = (4 * np.pi * p.area) / (p.perimeter**2) if p.perimeter > 0 else 0
-        if circ < CIRCULARITY_MIN:
             continue
         out[masks == p.label] = p.label
     return out
