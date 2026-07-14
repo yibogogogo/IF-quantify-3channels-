@@ -2,7 +2,7 @@
 
 免疫荧光三通道定量分析工具 — 全场比值法 v2
 
-用于**CD138分选阳性细胞**甩片制片的免疫荧光图像定量分析。
+用于甩片制片的免疫荧光图像定量分析。
 
 ## 原理
 
@@ -22,7 +22,7 @@ CD138 通道仅用于染色质控，不用于细胞身份判定。
 | **Cellpose** | `--cellpose` | 高 | 慢 (需GPU) | torch, cellpose |
 | **Ensemble** | `--ensemble` | 最高 | 两者并行 | 以上两者 |
 
-> Ensemble 模式同时运行 StarDist + Cellpose，核计数取两者平均，显著提高准确性。
+> Ensemble 模式同时运行 StarDist + Cellpose
 
 ## 数据要求
 
@@ -88,17 +88,17 @@ pip install -r requirements.txt
 # 默认 multi-Otsu（最快）
 python if_quantify.py
 
-# StarDist 深度学习（推荐，prob_thresh=0.78）
+# StarDist 深度学习
 python if_quantify.py --stardist
 
 # 调整严格度
 python if_quantify.py --stardist --prob-thresh 0.85   # 更严格
 python if_quantify.py --stardist --prob-thresh 0.70   # 更宽松
 
-# 双模型集成（最准）
+# 双模型集成
 python if_quantify.py --ensemble
 
-# 样本校准（每样本一个GT，自动二分搜索最优阈值）
+# 样本校准（每样本一个GT，自动二分搜索最优阈值，最合理准确）
 python if_quantify.py --stardist --calibrate calibrations.txt
 
 # 并行加速（3视野并行）
@@ -117,7 +117,7 @@ python if_quantify.py --dry-run
 
 ## 校准流程（新数据首次使用）
 
-每样本人工计数一个视野的细胞核数，写入 `calibrations.txt`：
+每样本人工计数一个视野的细胞核数（注意文件夹名称同步），写入 `calibrations.txt`：
 
 ```ini
 # calibrations.txt
@@ -167,7 +167,7 @@ NUCLEUS_SIZE_MIN = 200      # 最小核面积（像素²）
 NUCLEUS_SIZE_MAX = 80000    # 最大核面积
 CIRCULARITY_MIN = 0.1       # 最低圆形度
 BACKGROUND_BORDER = 30      # 背景采样边框宽度
-PROB_THRESH = 0.78          # StarDist 默认概率阈值（5样本交叉验证）
+PROB_THRESH = 0.78          # StarDist 默认概率阈值
 ```
 
 ## 科学严谨性说明
@@ -175,8 +175,7 @@ PROB_THRESH = 0.78          # StarDist 默认概率阈值（5样本交叉验证�
 1. **核计数**：multi-Otsu 用 3 类 Otsu 分离暗背景/弱信号/亮核；StarDist/Cellpose 用预训练 CNN 纠正过度分割
 2. **背景校正**：四边框采样（排除核区域）取 **p25 百分位**，比均值和中位数更抗碎屑干扰
 3. **全场比值法**：不依赖单细胞分割质量，用总荧光/总核数，对密集核场景稳健
-4. **Ensemble**：双模型平均减少单一方法系统性偏差
-5. **CD138 质控**：用离心坐标判定核是否在 CD138+ 区域内，指导染色质量判断
+4. **CD138 质控**：用离心坐标判定核是否在 CD138+ 区域内，指导染色质量判断
 
 ## 依赖
 
