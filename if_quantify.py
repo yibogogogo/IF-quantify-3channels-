@@ -342,9 +342,10 @@ def segment_nuclei_cellpose(dapi_img: np.ndarray,
 
 
 def measure_background(img: np.ndarray, nuclei_mask: np.ndarray) -> float:
-    """从图像四边采样背景（中位数，排除核区域）
+    """从图像四边采样背景（低百分位，排除核区域）
 
-    优先中位数（正态性假设下均值≈中位数；有荧光碎屑时中位数更稳健）。
+    用 p25 估计背景：比中位数更不受碎屑影响，比均值更稳健。
+    荧光图像背景分布右偏，p25 代表"典型暗背景"。
     """
     h, w = img.shape
     b = BACKGROUND_BORDER
@@ -354,7 +355,7 @@ def measure_background(img: np.ndarray, nuclei_mask: np.ndarray) -> float:
     pixels = img[bg]
     if pixels.size < 100:
         pixels = img[border]
-    return float(np.median(pixels))
+    return float(np.percentile(pixels, 25))
 
 
 def process_field(dapi_path: str, ttll12_path: str, cd138_path: str,
