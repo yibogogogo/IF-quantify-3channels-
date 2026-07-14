@@ -2,3 +2,7 @@ numpy>=1.21
 Pillow>=9.0
 scipy>=1.7
 scikit-image>=0.19
+
+# 可选：深度学习核分割
+# stardist tensorflow    # StarDist
+# cellpose torch         # Cellpose
