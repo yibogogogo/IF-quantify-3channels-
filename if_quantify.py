@@ -487,6 +487,8 @@ def main():
                     help="双模型集成：同时使用 StarDist + Cellpose，核数取平均提高准确率")
     ap.add_argument("--prob-thresh", type=float, default=0.78,
                     help="StarDist 概率阈值 (0~1)，越高越严格，默认 0.78 (5样本交叉验证)")
+    ap.add_argument("--parallel", type=int, default=1, metavar="N",
+                    help="并行处理 N 个视野（默认 1=串行，建议 3-5）")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -532,25 +534,49 @@ def main():
         seg_method = f"StarDist (prob={args.prob_thresh})"
     else:
         seg_method = "multi-Otsu"
-    logger.info(f"\n开始分析... (核分割: {seg_method})")
+    logger.info(f"\n开始分析... (核分割: {seg_method})"
+                + (f", 并行={args.parallel}视野" if args.parallel > 1 else ""))
 
-    all_rows = []
+    # 收集所有待处理视野
+    all_tasks = []
     for sd in samples:
         sn = os.path.basename(sd)
         fields = scan_fields(sd)
         if args.test:
             fields = fields[:TEST_FIELDS]
         for fid, dap, t12, cd in fields:
-            try:
-                r = process_field(dap, t12, cd,
-                                  use_stardist=args.stardist or args.ensemble,
-                                  use_cellpose=args.cellpose or args.ensemble,
-                                  use_ensemble=args.ensemble,
-                                  prob_thresh=args.prob_thresh)
+            all_tasks.append((sn, fid, dap, t12, cd))
+
+    def _process_one(task):
+        sn, fid, dap, t12, cd = task
+        try:
+            r = process_field(dap, t12, cd,
+                              use_stardist=args.stardist or args.ensemble,
+                              use_cellpose=args.cellpose or args.ensemble,
+                              use_ensemble=args.ensemble,
+                              prob_thresh=args.prob_thresh)
+            if r:
+                return {"Sample": sn, "Field": f"New-{fid}", **r}
+        except Exception as e:
+            logger.error(f"  x [{sn} New-{fid}] 失败: {e}")
+        return None
+
+    all_rows = []
+    if args.parallel > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=args.parallel) as pool:
+            futures = {pool.submit(_process_one, t): t for t in all_tasks}
+            for n_done, fut in enumerate(as_completed(futures), 1):
+                r = fut.result()
                 if r:
-                    all_rows.append({"Sample": sn, "Field": f"New-{fid}", **r})
-            except Exception as e:
-                logger.error(f"  x [{sn} New-{fid}] 失败: {e}")
+                    all_rows.append(r)
+                if n_done % 5 == 0 or n_done == len(futures):
+                    logger.info(f"  进度: {n_done}/{len(futures)} 视野")
+    else:
+        for t in all_tasks:
+            r = _process_one(t)
+            if r:
+                all_rows.append(r)
 
     if not all_rows:
         logger.warning("x 无结果"); return
