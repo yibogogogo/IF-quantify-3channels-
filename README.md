@@ -115,6 +115,25 @@ python if_quantify.py --sample HD-HCZ
 python if_quantify.py --dry-run
 ```
 
+## 校准流程（新数据首次使用）
+
+每样本人工计数一个视野的细胞核数，写入 `calibrations.txt`：
+
+```ini
+# calibrations.txt
+HD-HCZ=745
+HD-LM=249
+NDMM-PGX=57
+```
+
+运行校准 + 全量分析：
+
+```bash
+python if_quantify.py --stardist --calibrate calibrations.txt --parallel 3
+```
+
+脚本自动二分搜索每个样本的最优 prob_thresh，然后全量分析。
+
 ## 输出文件
 
 ```
