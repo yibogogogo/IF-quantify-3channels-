@@ -407,7 +407,9 @@ def process_field(dapi_path: str, ttll12_path: str, cd138_path: str,
     # ---- 全场定量（主指标） ----
     bg_mean = measure_background(ttll12, nuclei_mask)
     total_raw = ttll12.sum()
-    total_corrected = max(total_raw - bg_mean * ttll12.size, 0)
+    # 只从非核像素减去背景（核区域本身不是背景）
+    non_nuc_area = ttll12.size - (nuclei_mask > 0).sum()
+    total_corrected = max(total_raw - bg_mean * non_nuc_area, 0)
     mean_all = total_corrected / n_nuc
 
     # ---- CD138 染色质控 ----
