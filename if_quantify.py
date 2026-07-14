@@ -24,7 +24,7 @@ CD138 分选阳性细胞的目的基因表达定量（全场比值法）
 安全约束：只读取文件，绝不修改或删除任何文件。
 """
 
-import os, sys, re, csv, logging
+import os, sys, re, csv, logging, gc
 import numpy as np
 from PIL import Image
 from scipy import ndimage as scipy_ndimage
@@ -285,7 +285,7 @@ def segment_nuclei(dapi_img: np.ndarray) -> np.ndarray:
         markers[y, x] = i + 1
     labs = segmentation.watershed(-dist, markers, mask=cl)
 
-    out = np.zeros_like(labs)
+    out = np.zeros(labs.shape, dtype=np.int16)
     for p in measure.regionprops(labs):
         if p.area < NUCLEUS_SIZE_MIN or p.area > NUCLEUS_SIZE_MAX:
             continue
@@ -309,7 +309,7 @@ def segment_nuclei_stardist(dapi_img: np.ndarray,
         prob_thresh=prob_thresh,
         nms_thresh=0.3,
     )
-    out = np.zeros_like(labels)
+    out = np.zeros(labels.shape, dtype=np.int16)
     for p in measure.regionprops(labels):
         if p.area < NUCLEUS_SIZE_MIN or p.area > NUCLEUS_SIZE_MAX:
             continue
@@ -333,7 +333,7 @@ def segment_nuclei_cellpose(dapi_img: np.ndarray,
         flow_threshold=flow_threshold,
         cellprob_threshold=cellprob_threshold,
     )
-    out = np.zeros_like(masks)
+    out = np.zeros(masks.shape, dtype=np.int16)
     for p in measure.regionprops(masks):
         if p.area < NUCLEUS_SIZE_MIN or p.area > NUCLEUS_SIZE_MAX:
             continue
@@ -559,6 +559,8 @@ def main():
                 return {"Sample": sn, "Field": f"New-{fid}", **r}
         except Exception as e:
             logger.error(f"  x [{sn} New-{fid}] 失败: {e}")
+        finally:
+            gc.collect()  # 释放该视野的大数组内存
         return None
 
     all_rows = []
