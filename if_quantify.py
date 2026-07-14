@@ -187,6 +187,7 @@ CHANNEL_MAP = {
 NUCLEUS_SIZE_MIN   = 200     # 最小核面积（像素^2），小淋巴细胞核约200-500
 NUCLEUS_SIZE_MAX   = 80000   # 最大核面积，大浆细胞核可达数万
 CIRCULARITY_MIN    = 0.1     # 最低圆形度 (0~1)，越低越允许不规则核
+PROB_THRESH        = 0.75    # StarDist 概率阈值（人工计数验证：HD-LM GT=158→检出=162）
 
 # ---- 背景采样 ----
 BACKGROUND_BORDER  = 30      # 从图像四边取 N 像素宽的边框作为背景
@@ -296,21 +297,19 @@ def segment_nuclei(dapi_img: np.ndarray) -> np.ndarray:
 
 
 def segment_nuclei_stardist(dapi_img: np.ndarray,
-                            prob_thresh: float = 0.6,
+                            prob_thresh: float = 0.75,
                             dapi_min_intensity: float = None) -> np.ndarray:
     """StarDist 预训练模型 DAPI 核分割 -> 返回 label_mask
 
     使用 2D_versatile_fluo 模型（在多种荧光核图像上训练）。
+    整图推理（不分割），避免边界拼接伪影。
     两层过滤：
-      1. prob_thresh — 模型对该像素属于核的置信度下限（推荐 0.5~0.7）
+      1. prob_thresh — 模型置信度下限（推荐 0.70~0.80，已人工验证 0.75）
       2. dapi_min_intensity — DAPI 通道均值下限，剔除弱信号假阳性
-
-    大图自动分块处理避免内存溢出。
     """
     model = _get_stardist()
     labels, _ = model.predict_instances(
         dapi_img,
-        n_tiles=(2, 2) if max(dapi_img.shape) > 2048 else None,
         prob_thresh=prob_thresh,
         nms_thresh=0.3,
     )
@@ -379,7 +378,7 @@ def process_field(dapi_path: str, ttll12_path: str, cd138_path: str,
                   use_stardist: bool = False,
                   use_cellpose: bool = False,
                   use_ensemble: bool = False,
-                  prob_thresh: float = 0.6) -> dict:
+                  prob_thresh: float = 0.75) -> dict:
     """处理单个视野
 
     use_ensemble=True 时：同时跑 StarDist + Cellpose，核数取两者平均。
@@ -502,8 +501,8 @@ def main():
                     help="使用 Cellpose 预训练模型进行 DAPI 核分割（需先 pip install cellpose）")
     ap.add_argument("--ensemble", action="store_true",
                     help="双模型集成：同时使用 StarDist + Cellpose，核数取平均提高准确率")
-    ap.add_argument("--prob-thresh", type=float, default=0.6,
-                    help="StarDist 概率阈值 (0~1)，越高越严格，默认 0.6")
+    ap.add_argument("--prob-thresh", type=float, default=0.75,
+                    help="StarDist 概率阈值 (0~1)，越高越严格，默认 0.75 (人工计数验证)")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
